@@ -8,8 +8,8 @@ tsim = 0:dt:tsim_end;
 t_trajectory = tsim;
 
 % Define the obstacles position
-x_obstacle1 = 0.99816;
-y_obstacle1 = 3.873;
+x_obstacle1 = 2.0;
+y_obstacle1 = 1.5;
 r_obstacle1 = 0.5;
 r_ego = 0.2;
 
@@ -98,7 +98,7 @@ end
     curr_x_bar = [x_traj_ref(1:n_horizon);y_traj_ref(1:n_horizon);theta_traj_ref(1:n_horizon)];
     u_bar = [u_1_traj_ref(1:n_horizon - 1); u_2_traj_ref(1:n_horizon - 1)];
 
-    initial_position_trajectory_mpc = zeros(length(tsim), 4); % Assuming 4D position for ancilliary controller
+    initial_position_trajectory = zeros(length(tsim),3); % Assuming 4D position for ancilliary controller
     % Create a figure outside the loop for combined trajectory
     h_combined = figure;
 
@@ -126,18 +126,35 @@ while (counter < (length(tsim) - 1 - n_horizon))
             input_list{sub_counter} = new_mat_exp(1:number_states, 1:number_states);
             sub_counter = sub_counter + 1;
         end
+
+        for i = 1: n_horizon - 1
+            % Linearization around some reference trajectory -- Eq7 Daniel et
+            % al. 
+            % A_approx = df/dx|xo = [0 0 -sin(x3) * u1; 0 0 cos(x3)*u1; 0 0 0]
+            A_approx = [0, 0, -sin(curr_x_bar(3, i)) * u_bar(1, i);0, 0, cos(curr_x_bar(3, i)) * u_bar(1, i); 0, 0, 0];
+            % b_approx = f(x)
+            % We dont have a C matrix bc this is a simple example
+            B_approx = [cos(curr_x_bar(3, i)), 0;sin(curr_x_bar(3,i)) ,0 ;0, 1];
+            
+            % Discretization using expm
+            new_mat = [[A_approx, B_approx];[zeros(number_controls, (number_states + number_controls))]];
+            new_mat_exp = expm(new_mat * dt);
+            input_list{sub_counter} = new_mat_exp(1:number_states, number_states + 1 :end);
+            sub_counter = sub_counter + 1;
+        end
         
         % Define the matrix of the obstacles
         A_obstacle_1 = []; % (xbar - xobs)'*(xbar - xobs)
-        b_obstacle_1 = []; % robs* ||xbar - xobs||
+        b_obstacle_1 = []; 
+       
 
         for l = 2:n_horizon
             position_bar = curr_x_bar(1:2,l - 1);                         
-            A_obstacle_1(:,l - 1) = (position_bar - [x_obstacle1;y_obstacle1])' * (position_bar - [x_obstacle1;y_obstacle1]);
-            b_obstacle_1(l - 1) =  r_total1 * norm(position_bar - [x_obstacle1;y_obstacle1],2);
+            A_obstacle_1(:,l - 1) = -(position_bar - [x_obstacle1;y_obstacle1]);
+            b_obstacle_1(l - 1) = [x_obstacle1;y_obstacle1]'*(position_bar - [x_obstacle1;y_obstacle1]) + r_total1 * norm(position_bar - [x_obstacle1;y_obstacle1], 2);
         end
 
-        for i = 1: n_horizon -1
+        for i = 1: n_horizon - 1
             input_list{sub_counter} = A_obstacle_1(:,i);
             sub_counter = sub_counter + 1;
         end
@@ -163,21 +180,16 @@ while (counter < (length(tsim) - 1 - n_horizon))
         % % oscillations
         Ts = 0.001; % define the time
         [Kd, ~, ~] = lqrd(A_approx, B_approx, Q_cost, R_cost,Ts); 
-        difference_traj = initial_position - x_mpc;
+        difference_traj = curr_x - x_mpc;
         u_lqr = Kd * difference_traj;
         u_total = u_current_point + u_lqr;  % this is now the closed loop controller
 
         %% Step 6 - Forward simulation with the combined new controller
         options = odeset('RelTol', 1e-3, 'AbsTol', 1e-6);
-        [t, qt_ode] = ode45(@(t, qt) actual_dynamics_ugv_ct(t, qt, u_total),[tsim(counter),tsim(counter + 1)],initial_position);
+        [t, qt_ode] = ode45(@(t, qt) actual_dynamics_ugv_ct(t, qt, u_total),[tsim(counter),tsim(counter + 1)],curr_x);
         contoller_path_output = qt_ode;
-        initial_position = qt_ode(end,:)'; % the last position of the new total controller is the new position
-      
-        [t_qp, xt_qp] = ode45(@(t, x) dynamics(x, clfQP(x)), [0, 20], x0_nlp);
-        initial_position_trajectory_(counter + 1, :) = initial_position;
-     
-        initial_position_trajectory_qp_track(counter + 1, :) = xt_qp(1,:);
-        x0_nlp = initial_position;
+        curr_x = qt_ode(end,:)'; % the last position of the new total controller is the new position
+        initial_position_trajectory(counter + 1, :) = curr_x;
  
         %% Plotting stuff - Update the controller trajectory plot data
         figure(h_combined);
@@ -188,10 +200,13 @@ while (counter < (length(tsim) - 1 - n_horizon))
 
         % Plot the trajectroy followed by the controller based on the MPC
         % optimization
-        plot(initial_position_trajectory_mpc(:, 1), initial_position_trajectory_mpc(:, 2), 'r*', 'LineWidth', 2, 'DisplayName', 'MPC Controller Trajectory');
+        plot(initial_position_trajectory(:, 1), initial_position_trajectory(:, 2), 'r*', 'LineWidth', 2, 'DisplayName', 'MPC Controller Trajectory');
         hold on;
 
-        plot(initial_position_trajectory_qp_track(:, 1), initial_position_trajectory_qp_track(:, 2), 'go', 'LineWidth', 2, 'DisplayName', 'NL-QP Controller Trajectory');
+        % Plot the obstacles
+        X1_example =[x_obstacle1, y_obstacle1];
+        scatter(x_obstacle1, y_obstacle1, 'k', 'LineWidth', 2, 'DisplayName', 'Obstacle 1');
+        viscircles(X1_example, r_total1, 'LineStyle', '--', 'Color', 'r', LineWidth=2.0); % Plot safety radius circle
 
         title('Combined Controller Trajectory vs Reference Trajectory');
         xlabel('X - axis');
